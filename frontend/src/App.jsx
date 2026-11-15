@@ -126,27 +126,11 @@ function getGuidanceParts(analysis) {
   };
   actions.forEach(a => addResource(a.destination || a.title || "Open official resource", a.url));
   (Array.isArray(analysis?.retrieved_sources) ? analysis.retrieved_sources : []).forEach(x => addResource(x.source || x.topic || "Reference source", x.url));
-
-  // Make the instruction to open the resources explicit and place the links
-  // immediately after that instruction in the ordered flow.
-  const linkInstruction = /\b(click|open|visit|use)\b.{0,70}\b(links?|resources?)\b|\b(links?|resources?)\b.{0,70}\b(below|given|following)\b/i;
-  let resourcesAfterStep = -1;
-  if (resources.length) {
-    resourcesAfterStep = actions.findIndex(a => linkInstruction.test(`${a?.title || ""} ${a?.detail || ""}`));
-    if (resourcesAfterStep < 0) {
-      actions.push({
-        title: "Open the official links below",
-        detail: "Click the relevant link below to open the official reporting or support resource. Use the link that matches your situation.",
-        urgency: "low"
-      });
-      resourcesAfterStep = actions.length - 1;
-    }
-  }
-  return { scenario, actions, resources, resourcesAfterStep };
+  return { scenario, actions, resources };
 }
 
 function OrderedGuidance({ analysis, animate = true }) {
-  const { scenario, actions, resources, resourcesAfterStep } = useMemo(() => getGuidanceParts(analysis), [analysis]);
+  const { scenario, actions, resources } = useMemo(() => getGuidanceParts(analysis), [analysis]);
   const [block, setBlock] = useState(animate ? 0 : actions.length + 1);
   const [chars, setChars] = useState(animate ? 0 : scenario.length);
 
@@ -165,60 +149,43 @@ function OrderedGuidance({ analysis, animate = true }) {
     const tick = () => {
       if (cancelled) return;
       const currentText = currentBlock === 0 ? scenario : String(actions[currentBlock - 1]?.detail || actions[currentBlock - 1]?.title || "");
-      currentChars = Math.min(currentChars + 1, currentText.length);
+      currentChars = Math.min(currentChars + 3, currentText.length);
       setBlock(currentBlock);
       setChars(currentChars);
       if (currentChars >= currentText.length) {
         currentBlock += 1;
         currentChars = 0;
-        if (currentBlock <= actions.length) timer = setTimeout(tick, 900);
+        if (currentBlock <= actions.length) timer = setTimeout(tick, 300);
         else setBlock(actions.length + 1);
-      } else timer = setTimeout(tick, 35);
+      } else timer = setTimeout(tick, 14);
     };
-    timer = setTimeout(tick, 250);
+    timer = setTimeout(tick, 120);
     return () => { cancelled = true; clearTimeout(timer); };
   }, [scenario, actions, animate]);
 
   const scenarioText = !animate || block > 0 ? scenario : scenario.slice(0, chars);
   const scenarioTyping = animate && block === 0 && chars < scenario.length;
   const scenarioTone = intensityStyles[intensityTone(analysis?.risk_level || analysis?.status)];
-  return <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-md" aria-live="polite">
-    <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-3">
-      <div className="flex items-center gap-2"><ShieldCheck size={17} className="text-teal-700"/><h3 className="text-xs font-extrabold uppercase tracking-[.16em] text-slate-700">Incident guidance</h3></div>
-      <span className="rounded-full bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">{actions.length} ordered {actions.length === 1 ? "step" : "steps"}</span>
+  return <section className="space-y-3" aria-live="polite">
+    <div className={cn("rounded-2xl border p-5 shadow-sm", scenarioTone.card)}>
+      <div className="mb-3 flex items-center gap-2"><span className={cn("grid h-8 w-8 place-items-center rounded-xl bg-white/80", scenarioTone.icon)}><Sparkles size={16}/></span><div><h4 className="text-sm font-extrabold text-slate-900">Scenario</h4><p className={cn("text-[10px] font-medium uppercase tracking-wider", scenarioTone.label)}>What happened and what it means · {String(analysis?.risk_level || "assessment").replaceAll("_", " ")}</p></div></div>
+      <p className="whitespace-pre-wrap text-sm leading-7 text-slate-700">{scenarioText}{scenarioTyping && <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-teal-500 align-middle"/>}</p>
     </div>
-    <div className="p-4 sm:p-5">
-      <div className={cn("rounded-xl border p-4", scenarioTone.card)}>
-        <div className="mb-3 flex items-center gap-3"><span className={cn("grid h-9 w-9 place-items-center rounded-xl bg-white/80", scenarioTone.icon)}><Sparkles size={17}/></span><div><div className="flex items-center gap-2"><span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">00</span><h4 className="text-sm font-extrabold text-slate-900">Scenario</h4></div><p className={cn("text-[10px] font-semibold uppercase tracking-wider", scenarioTone.label)}>Situation overview · {String(analysis?.risk_level || "assessment").replaceAll("_", " ")}</p></div></div>
-        <p className="whitespace-pre-wrap text-sm leading-7 text-slate-700">{scenarioText}{scenarioTyping && <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-teal-500 align-middle"/>}</p>
-      </div>
-      {actions.length > 0 && <div className="my-4 flex items-center gap-3"><div className="h-px flex-1 bg-slate-200"/><span className="text-[10px] font-extrabold uppercase tracking-[.16em] text-slate-400">Recommended sequence</span><div className="h-px flex-1 bg-slate-200"/></div>}
-      <div className="space-y-3">
-        {actions.map((action, i) => {
-          const actionBlock = i + 1;
-          if (animate && block < actionBlock) return null;
-          const detail = String(action.detail || "");
-          const isTyping = animate && block === actionBlock && chars < detail.length;
-          const shownDetail = !animate || block > actionBlock ? detail : detail.slice(0, chars);
-          const stepTone = intensityStyles[intensityTone(action.urgency || action.priority || action.risk_level)];
-          return <div key={`${i}-${action.title || "step"}`}>
-            <div className={cn("rounded-xl border p-4", stepTone.card)}>
-              <div className="flex items-start gap-3">
-                <span className={cn("grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-extrabold text-white shadow-sm", stepTone.marker)}>{String(i + 1).padStart(2, "0")}</span>
-                <div className="min-w-0 flex-1">
-                  <div className="mb-1 flex flex-wrap items-center gap-2"><span className={cn("text-[10px] font-extrabold uppercase tracking-[.14em]", stepTone.label)}>Step {i + 1}</span><span className="text-[10px] text-slate-400">of {actions.length}</span></div>
-                  <h4 className="text-sm font-extrabold text-slate-900">{action.title || `Action ${i + 1}`}</h4>
-                  <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-700">{shownDetail}{isTyping && <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-teal-600 align-middle"/>}</p>
-                  {action.destination && <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">{action.destination}</p>}
-                </div>
-              </div>
-            </div>
-            {resources.length > 0 && i === resourcesAfterStep && (!animate || block > actionBlock) && <div className="mt-3 rounded-xl border border-emerald-300 bg-emerald-50 p-4"><div className="mb-2 flex items-center gap-2 text-sm font-extrabold text-emerald-900"><ShieldCheck size={17}/> Official links and resources</div><p className="mb-3 text-xs leading-5 text-emerald-800">Select the relevant official link to continue.</p><div className="space-y-2">{resources.map((resource, ri) => <a key={ri} href={resource.url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-between gap-3 rounded-lg border border-emerald-300 bg-white px-3 py-3 text-sm font-bold text-emerald-800 transition hover:bg-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"><span className="min-w-0 break-words">{resource.label}</span><ArrowUpRight size={16} className="shrink-0"/></a>)}</div></div>}
-          </div>;
-        })}
-      </div>
-      {actions.length === 0 && block > 0 && <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">No specific action steps were returned. Review the scenario carefully and verify through official channels before acting.</p>}
-    </div>
+    {actions.map((action, i) => {
+      const actionBlock = i + 1;
+      if (animate && block < actionBlock) return null;
+      const detail = String(action.detail || "");
+      const isTyping = animate && block === actionBlock && chars < detail.length;
+      const shownDetail = !animate || block > actionBlock ? detail : detail.slice(0, chars);
+      const stepTone = intensityStyles[intensityTone(action.urgency || action.priority || action.risk_level)];
+      return <div key={`${i}-${action.title || "step"}`} className="rounded-xl border border-transparent p-1 shadow-sm">
+        <div className="mb-2 flex items-center gap-3"><span className={cn("grid h-8 w-8 shrink-0 place-items-center rounded-full text-sm font-extrabold text-white", stepTone.marker)}>{i + 1}</span><div className={cn("text-[10px] font-extrabold uppercase tracking-[.14em]", stepTone.label)}>Step {i + 1}</div></div>
+        <ActionCard action={{...action, detail: shownDetail}}/>
+        {isTyping && <span className="ml-1 inline-block h-4 w-1 animate-pulse bg-teal-500 align-middle"/>}
+      </div>;
+    })}
+    {actions.length === 0 && block > 0 && <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">No specific action steps were returned. Review the scenario carefully and verify through official channels before acting.</p>}
+    {resources.length > 0 && (!animate || block > actions.length) && <div className="rounded-2xl border border-emerald-200 bg-emerald-50 p-4"><div className="mb-2 flex items-center gap-2 text-sm font-extrabold text-emerald-900"><ShieldCheck size={17}/> Official links and resources</div><div className="space-y-2">{resources.map((resource, i) => <a key={i} href={resource.url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-white px-3 py-3 text-sm font-bold text-emerald-800 transition hover:bg-emerald-100"><span className="min-w-0 break-words">{resource.label}</span><ArrowUpRight size={16} className="shrink-0"/></a>)}</div></div>}
   </section>;
 }
 
@@ -431,7 +398,7 @@ function AnalysisPanel({ session, onSaved, onClose }) {
     {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div>}
     {result && <div className="space-y-4" aria-live="polite">
       <div className={cn("rounded-xl border p-5", result.status === "urgent_response" ? "border-rose-200 bg-rose-50" : "border-stone-200 bg-white")}>
-        <div className="flex flex-wrap items-center justify-between gap-2"><SeverityPill status={result.status}/><span className="text-[10px] font-semibold text-slate-500">{result.summary_provider === "local_qwen3" ? "AI analysis · Local Qwen3" : result.summary_provider ? `AI analysis · ${String(result.summary_provider).replaceAll("_", " ")}` : "Analysis ready"}</span></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><SeverityPill status={result.status}/><span className="text-[10px] font-semibold text-slate-500">Analysis: {result.summary_provider === "local_qwen3" ? "AI-generated · Local Qwen3" : "AI unavailable"}</span></div>
         <h3 className="mt-3 text-xl font-extrabold capitalize text-slate-900">{(result.category || "Situation").replaceAll("_", " ")}</h3>
         <p className="mt-2 text-[10px] text-slate-400">The scenario and recommended steps appear in sequence. Spoken language: {result.output_language || outputLanguage}.</p>
         <button onClick={speakSummary} disabled={speaking} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">{speaking ? <LoaderCircle size={15} className="animate-spin"/> : <Volume2 size={15}/>} Replay full response</button>
