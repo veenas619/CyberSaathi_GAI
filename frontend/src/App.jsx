@@ -72,12 +72,154 @@ function EmptyState({ onNew }) {
   </div>;
 }
 
+function intensityTone(value) {
+  const level = String(value || "").toLowerCase();
+  if (["critical", "urgent", "urgent_response", "urgent_protective_action"].includes(level)) return "critical";
+  if (["high", "elevated"].includes(level)) return "high";
+  if (["medium", "important", "moderate", "review"].includes(level)) return "medium";
+  return "low";
+}
+
+const intensityStyles = {
+  critical: { card: "border-rose-300 bg-rose-100/90", icon: "text-rose-700", marker: "bg-rose-700", label: "text-rose-800", iconComponent: AlertTriangle },
+  high: { card: "border-orange-300 bg-orange-100/90", icon: "text-orange-700", marker: "bg-orange-600", label: "text-orange-800", iconComponent: AlertTriangle },
+  medium: { card: "border-amber-300 bg-amber-100/80", icon: "text-amber-700", marker: "bg-amber-600", label: "text-amber-800", iconComponent: AlertCircle },
+  low: { card: "border-teal-200 bg-teal-50/90", icon: "text-teal-700", marker: "bg-teal-700", label: "text-teal-800", iconComponent: CheckCircle2 }
+};
+
 function ActionCard({ action }) {
-  const urgent = action.urgency === "urgent";
-  const important = action.urgency === "important";
-  return <div className={cn("rounded-xl border p-4", urgent ? "border-rose-200 bg-rose-50/80" : important ? "border-amber-200 bg-amber-50/80" : "border-teal-200 bg-teal-50/70")}>
-    <div className="flex items-start gap-3"><span className={cn("mt-0.5", urgent ? "text-rose-600" : important ? "text-amber-600" : "text-teal-600")}>{urgent ? <AlertTriangle size={17}/> : <CheckCircle2 size={17}/>}</span><div className="min-w-0 flex-1"><h4 className="text-sm font-bold text-slate-900">{action.title}</h4><p className="mt-1 text-sm leading-6 text-slate-600">{action.detail}</p>{action.destination && <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-slate-400">{action.destination}</p>}{action.url && <a href={action.url} target="_blank" rel="noreferrer" className="mt-3 inline-flex items-center gap-1 text-xs font-bold text-teal-700 hover:underline">Open official resource <ArrowUpRight size={13}/></a>}</div></div>
+  const tone = intensityTone(action.urgency || action.priority || action.risk_level);
+  const style = intensityStyles[tone];
+  const Icon = style.iconComponent;
+  return <div className={cn("rounded-xl border p-4", style.card)}>
+    <div className="flex items-start gap-3"><span className={cn("mt-0.5", style.icon)}><Icon size={17}/></span><div className="min-w-0 flex-1"><h4 className="text-sm font-bold text-slate-900">{action.title}</h4><p className="mt-1 text-sm leading-6 text-slate-700">{action.detail}</p>{action.destination && <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">{action.destination}</p>}</div></div>
   </div>;
+}
+
+function getGuidanceParts(analysis) {
+  const raw = String(analysis?.localized_summary || analysis?.summary || analysis?.english_summary || "The incident details are being assessed.").trim();
+  const actions = Array.isArray(analysis?.actions) ? analysis.actions : [];
+  // The model's spoken summary often repeats the same steps that are also
+  // returned as structured actions. Keep only the scenario introduction here.
+  let cutAt = -1;
+  const stepMarker = /\b(?:step\s*1\s*[:.)-]?|1\s*[.)]\s+)/i.exec(raw);
+  if (stepMarker) cutAt = stepMarker.index;
+  if (actions.length) {
+    for (const action of actions) {
+      for (const candidate of [action?.title, action?.detail]) {
+        if (!candidate || candidate.trim().length < 18) continue;
+        const idx = raw.toLowerCase().indexOf(candidate.trim().slice(0, 70).toLowerCase());
+        if (idx >= 0 && (cutAt < 0 || idx < cutAt)) cutAt = idx;
+      }
+    }
+  }
+  let scenario = (cutAt >= 0 ? raw.slice(0, cutAt) : raw).trim();
+  // Remove a trailing model-generated follow-up question; this interface is
+  // a one-way guidance flow and does not present question prompts.
+  scenario = scenario.replace(/\s*[^.!?]*\?\s*$/, "").trim();
+  scenario = scenario.replace(/(?:Here are some safe habits[^.]*\.)\s*$/i, "").trim() || "Here is what the situation means and what to do next.";
+
+  const resources = [];
+  const addResource = (label, url) => {
+    if (typeof url !== "string" || !/^https?:\/\//i.test(url.trim())) return;
+    if (!resources.some(x => x.url === url.trim())) resources.push({ label: label || "Open official resource", url: url.trim() });
+  };
+  actions.forEach(a => addResource(a.destination || a.title || "Open official resource", a.url));
+  (Array.isArray(analysis?.retrieved_sources) ? analysis.retrieved_sources : []).forEach(x => addResource(x.source || x.topic || "Reference source", x.url));
+
+  // Make the instruction to open the resources explicit and place the links
+  // immediately after that instruction in the ordered flow.
+  const linkInstruction = /\b(click|open|visit|use)\b.{0,70}\b(links?|resources?)\b|\b(links?|resources?)\b.{0,70}\b(below|given|following)\b/i;
+  let resourcesAfterStep = -1;
+  if (resources.length) {
+    resourcesAfterStep = actions.findIndex(a => linkInstruction.test(`${a?.title || ""} ${a?.detail || ""}`));
+    if (resourcesAfterStep < 0) {
+      actions.push({
+        title: "Open the official links below",
+        detail: "Click the relevant link below to open the official reporting or support resource. Use the link that matches your situation.",
+        urgency: "low"
+      });
+      resourcesAfterStep = actions.length - 1;
+    }
+  }
+  return { scenario, actions, resources, resourcesAfterStep };
+}
+
+function OrderedGuidance({ analysis, animate = true }) {
+  const { scenario, actions, resources, resourcesAfterStep } = useMemo(() => getGuidanceParts(analysis), [analysis]);
+  const [block, setBlock] = useState(animate ? 0 : actions.length + 1);
+  const [chars, setChars] = useState(animate ? 0 : scenario.length);
+
+  useEffect(() => {
+    if (!animate) {
+      setBlock(actions.length + 1);
+      setChars(scenario.length);
+      return;
+    }
+    let cancelled = false;
+    let timer;
+    let currentBlock = 0;
+    let currentChars = 0;
+    setBlock(0);
+    setChars(0);
+    const tick = () => {
+      if (cancelled) return;
+      const currentText = currentBlock === 0 ? scenario : String(actions[currentBlock - 1]?.detail || actions[currentBlock - 1]?.title || "");
+      currentChars = Math.min(currentChars + 1, currentText.length);
+      setBlock(currentBlock);
+      setChars(currentChars);
+      if (currentChars >= currentText.length) {
+        currentBlock += 1;
+        currentChars = 0;
+        if (currentBlock <= actions.length) timer = setTimeout(tick, 900);
+        else setBlock(actions.length + 1);
+      } else timer = setTimeout(tick, 35);
+    };
+    timer = setTimeout(tick, 250);
+    return () => { cancelled = true; clearTimeout(timer); };
+  }, [scenario, actions, animate]);
+
+  const scenarioText = !animate || block > 0 ? scenario : scenario.slice(0, chars);
+  const scenarioTyping = animate && block === 0 && chars < scenario.length;
+  const scenarioTone = intensityStyles[intensityTone(analysis?.risk_level || analysis?.status)];
+  return <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-md" aria-live="polite">
+    <div className="flex items-center justify-between border-b border-slate-200 bg-slate-50 px-5 py-3">
+      <div className="flex items-center gap-2"><ShieldCheck size={17} className="text-teal-700"/><h3 className="text-xs font-extrabold uppercase tracking-[.16em] text-slate-700">Incident guidance</h3></div>
+      <span className="rounded-full bg-white px-3 py-1 text-[10px] font-bold uppercase tracking-wider text-slate-500">{actions.length} ordered {actions.length === 1 ? "step" : "steps"}</span>
+    </div>
+    <div className="p-4 sm:p-5">
+      <div className={cn("rounded-xl border p-4", scenarioTone.card)}>
+        <div className="mb-3 flex items-center gap-3"><span className={cn("grid h-9 w-9 place-items-center rounded-xl bg-white/80", scenarioTone.icon)}><Sparkles size={17}/></span><div><div className="flex items-center gap-2"><span className="text-[10px] font-extrabold uppercase tracking-wider text-slate-500">00</span><h4 className="text-sm font-extrabold text-slate-900">Scenario</h4></div><p className={cn("text-[10px] font-semibold uppercase tracking-wider", scenarioTone.label)}>Situation overview · {String(analysis?.risk_level || "assessment").replaceAll("_", " ")}</p></div></div>
+        <p className="whitespace-pre-wrap text-sm leading-7 text-slate-700">{scenarioText}{scenarioTyping && <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-teal-500 align-middle"/>}</p>
+      </div>
+      {actions.length > 0 && <div className="my-4 flex items-center gap-3"><div className="h-px flex-1 bg-slate-200"/><span className="text-[10px] font-extrabold uppercase tracking-[.16em] text-slate-400">Recommended sequence</span><div className="h-px flex-1 bg-slate-200"/></div>}
+      <div className="space-y-3">
+        {actions.map((action, i) => {
+          const actionBlock = i + 1;
+          if (animate && block < actionBlock) return null;
+          const detail = String(action.detail || "");
+          const isTyping = animate && block === actionBlock && chars < detail.length;
+          const shownDetail = !animate || block > actionBlock ? detail : detail.slice(0, chars);
+          const stepTone = intensityStyles[intensityTone(action.urgency || action.priority || action.risk_level)];
+          return <div key={`${i}-${action.title || "step"}`}>
+            <div className={cn("rounded-xl border p-4", stepTone.card)}>
+              <div className="flex items-start gap-3">
+                <span className={cn("grid h-9 w-9 shrink-0 place-items-center rounded-full text-sm font-extrabold text-white shadow-sm", stepTone.marker)}>{String(i + 1).padStart(2, "0")}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="mb-1 flex flex-wrap items-center gap-2"><span className={cn("text-[10px] font-extrabold uppercase tracking-[.14em]", stepTone.label)}>Step {i + 1}</span><span className="text-[10px] text-slate-400">of {actions.length}</span></div>
+                  <h4 className="text-sm font-extrabold text-slate-900">{action.title || `Action ${i + 1}`}</h4>
+                  <p className="mt-1 whitespace-pre-wrap text-sm leading-6 text-slate-700">{shownDetail}{isTyping && <span className="ml-0.5 inline-block h-4 w-1 animate-pulse bg-teal-600 align-middle"/>}</p>
+                  {action.destination && <p className="mt-2 text-[10px] font-bold uppercase tracking-wider text-slate-500">{action.destination}</p>}
+                </div>
+              </div>
+            </div>
+            {resources.length > 0 && i === resourcesAfterStep && (!animate || block > actionBlock) && <div className="mt-3 rounded-xl border border-emerald-300 bg-emerald-50 p-4"><div className="mb-2 flex items-center gap-2 text-sm font-extrabold text-emerald-900"><ShieldCheck size={17}/> Official links and resources</div><p className="mb-3 text-xs leading-5 text-emerald-800">Select the relevant official link to continue.</p><div className="space-y-2">{resources.map((resource, ri) => <a key={ri} href={resource.url} target="_blank" rel="noopener noreferrer" className="flex items-center justify-between gap-3 rounded-lg border border-emerald-300 bg-white px-3 py-3 text-sm font-bold text-emerald-800 transition hover:bg-emerald-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"><span className="min-w-0 break-words">{resource.label}</span><ArrowUpRight size={16} className="shrink-0"/></a>)}</div></div>}
+          </div>;
+        })}
+      </div>
+      {actions.length === 0 && block > 0 && <p className="rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm leading-6 text-amber-800">No specific action steps were returned. Review the scenario carefully and verify through official channels before acting.</p>}
+    </div>
+  </section>;
 }
 
 function AnalysisPanel({ session, onSaved, onClose }) {
@@ -100,7 +242,10 @@ function AnalysisPanel({ session, onSaved, onClose }) {
       narration,
       category: analysis.category,
       status: analysis.status,
-      summary: analysis.summary,
+      summary: analysis.localized_summary || analysis.summary,
+      detailed_analysis: analysis.detailed_analysis || analysis.english_summary || "",
+      localized_summary: analysis.localized_summary || analysis.summary,
+      output_language: analysis.output_language || "en-IN",
       engine: analysis.engine,
       events: analysis.events || [],
       confirmed_facts: analysis.confirmed_facts || [],
@@ -286,15 +431,12 @@ function AnalysisPanel({ session, onSaved, onClose }) {
     {error && <div role="alert" className="rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">{error}</div>}
     {result && <div className="space-y-4" aria-live="polite">
       <div className={cn("rounded-xl border p-5", result.status === "urgent_response" ? "border-rose-200 bg-rose-50" : "border-stone-200 bg-white")}>
-        <div className="flex flex-wrap items-center justify-between gap-2"><SeverityPill status={result.status}/><span className="text-[10px] font-semibold text-slate-500">Analysis: {result.summary_provider === "local_qwen3" ? "AI-generated · Local Qwen3" :"."}</span></div>
+        <div className="flex flex-wrap items-center justify-between gap-2"><SeverityPill status={result.status}/><span className="text-[10px] font-semibold text-slate-500">{result.summary_provider === "local_qwen3" ? "AI analysis · Local Qwen3" : result.summary_provider ? `AI analysis · ${String(result.summary_provider).replaceAll("_", " ")}` : "Analysis ready"}</span></div>
         <h3 className="mt-3 text-xl font-extrabold capitalize text-slate-900">{(result.category || "Situation").replaceAll("_", " ")}</h3>
-        <p className="mt-2 text-sm leading-7 text-slate-700">{result.localized_summary || result.summary}</p><p className="mt-2 text-[10px] text-slate-400">Full AI response is retained for review. Spoken language: {result.output_language || outputLanguage}.</p>
+        <p className="mt-2 text-[10px] text-slate-400">The scenario and recommended steps appear in sequence. Spoken language: {result.output_language || outputLanguage}.</p>
         <button onClick={speakSummary} disabled={speaking} className="mt-4 inline-flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-50">{speaking ? <LoaderCircle size={15} className="animate-spin"/> : <Volume2 size={15}/>} Replay full response</button>
       </div>
-      {result.events?.length > 0 && <div className="rounded-2xl border border-slate-200 bg-white p-5"><h4 className="flex items-center gap-2 text-sm font-bold text-slate-900"><Activity size={17} className="text-teal-600"/> Reconstructed timeline</h4><ol className="mt-4 space-y-4 border-l border-teal-100 pl-5">{result.events.map((event, i) => <li key={i} className="relative"><span className="absolute -left-[25px] top-1 h-2.5 w-2.5 rounded-full border-2 border-white bg-teal-500 ring-2 ring-teal-100"/><div className="text-xs font-bold capitalize text-slate-800">{event.sequence || i + 1}. {(event.type || "Event").replaceAll("_", " ")}</div><p className="mt-1 text-sm leading-6 text-slate-500">{event.description}</p></li>)}</ol></div>}
-      {result.suspicious_indicators?.length > 0 && <div className="rounded-2xl border border-amber-200 bg-amber-50/50 p-5"><h4 className="text-sm font-bold text-slate-900">Potential warning signs</h4><ul className="mt-3 list-disc space-y-2 pl-5 text-sm text-slate-600">{result.suspicious_indicators.map((x, i) => <li key={i}>{x}</li>)}</ul></div>}
-      {result.actions?.length > 0 && <div className="space-y-3"><h4 className="text-sm font-bold text-slate-900">Recommended next steps</h4>{result.actions.map((action, i) => <ActionCard key={i} action={action}/>)}</div>}
-      {result.retrieved_sources?.length > 0 && <div className="rounded-2xl border border-teal-100 bg-teal-50/40 p-5"><h4 className="text-sm font-bold text-slate-900">Knowledge used by CyberSaathi</h4><p className="mt-1 text-xs text-slate-500">Local RAG retrieved these reference passages for the assessment.</p><ul className="mt-3 space-y-2">{result.retrieved_sources.map((source, i) => <li key={i} className="text-xs text-slate-600"><span className="font-semibold">{source.source}</span>{source.topic && <span className="text-slate-400"> · {source.topic}</span>}{source.url && <a className="ml-2 font-bold text-teal-700 hover:underline" href={source.url} target="_blank" rel="noreferrer">View source</a>}</li>)}</ul></div>}
+      <OrderedGuidance analysis={result}/>
       <p className="rounded-xl bg-slate-100 p-3 text-xs leading-5 text-slate-500">{result.disclaimer}</p>
     </div>}
   </div>;
@@ -314,9 +456,8 @@ function DetailModal({ incident, onClose }) {
     <div className="max-h-[85vh] w-full max-w-2xl overflow-y-auto rounded-2xl border border-slate-200 bg-white p-6 shadow-2xl">
       <div className="flex items-start justify-between gap-3"><div><SeverityPill status={incident.status}/><h3 className="mt-3 text-xl font-extrabold capitalize text-slate-900">{(incident.category || "Incident").replaceAll("_", " ")}</h3><p className="mt-1 text-xs text-slate-400">{new Date(incident.created_at).toLocaleString()}</p></div><button onClick={onClose} className="rounded-lg p-2 text-slate-400 hover:bg-slate-100"><X size={18}/></button></div>
       <div className="mt-5 rounded-xl bg-slate-50 p-4"><div className="text-xs font-bold uppercase tracking-wider text-slate-400">Your description</div><p className="mt-2 whitespace-pre-wrap text-sm leading-7 text-slate-700">{incident.narration}</p></div>
-      <div className="mt-4"><div className="text-xs font-bold uppercase tracking-wider text-slate-400">Analysis summary</div><p className="mt-2 text-sm leading-7 text-slate-700">{incident.summary}</p></div>
-      {incident.events?.length > 0 && <div className="mt-5"><div className="text-sm font-bold text-slate-800">Timeline</div><ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-slate-600">{incident.events.map((ev, i) => <li key={i}>{ev.description}</li>)}</ol></div>}
-      {incident.actions?.length > 0 && <div className="mt-5 space-y-3"><div className="text-sm font-bold text-slate-800">Recommended actions</div>{incident.actions.map((a, i) => <ActionCard key={i} action={a}/>)}</div>}
+      <div className="mt-5"><OrderedGuidance analysis={incident} animate={false}/></div>
+      {incident.events?.length > 0 && <div className="mt-5"><div className="text-sm font-bold text-slate-800">Incident timeline</div><ol className="mt-3 list-decimal space-y-2 pl-5 text-sm text-slate-600">{incident.events.map((ev, i) => <li key={i}>{ev.description}</li>)}</ol></div>}
       <p className="mt-5 text-xs leading-5 text-slate-400">{incident.disclaimer}</p>
     </div>
   </div>;
