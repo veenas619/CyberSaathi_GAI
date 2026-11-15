@@ -62,8 +62,7 @@ RAG_EMBEDDING_MODEL=bge-m3
 RAG_EMBEDDING_TIMEOUT_SECONDS=90
 ```
 
-No Qwen3 local summarisation API key or cloud LLM API is required. Do not commit `.env` or put secrets in frontend environment variables.
-
+No Qwen3 local summarisation API key or cloud LLM API is required.
 ### 3. Index the knowledge base
 
 The five starter Markdown notes are in `backend/knowledge_base/raw/`. They are project-authored summaries with reference URLs, not official circulars. Verify sources and add current official material before production use.
@@ -98,7 +97,6 @@ Open `http://localhost:5173`.
 
 ## Important limitations
 
-- Qwen3 can make mistakes, including translation mistakes. Review localized emergency guidance carefully before production use.
 - Critical official phone numbers and URLs are checked by deterministic backend rules; if a localized summary omits required identifiers, the English summary is used rather than dropping them.
 - Prisma and Timbre send audio to Gnani services.
 - RAG retrieval does not guarantee correctness. The starter notes are not official legal or regulatory documents; replace/augment them with current primary sources and evaluate retrieval quality.
@@ -142,3 +140,7 @@ localized text before Timbre synthesizes speech.
 - **Timing logs** in the backend terminal, e.g. `[TIMING:fast] total=… prompt_tokens=… prefill=… output_tokens=… generate=… (N tok/s)` and `[TIMING:analysis] retrieval=… reasoning+summaries=…`. These show exactly where the time goes on your machine.
 
 **If it is still too slow:** read the `tok/s` in `[TIMING:fast]`. Below ~5 tok/s, use a smaller model (for example `qwen3:1.7b`, set `REASONING_MODEL`), or run Ollama with GPU support if your laptop has a GPU. Tests: `python -m pytest -q tests`.
+
+## Improvements for future scope: use evon model from hugging face. 
+The evon model by Gnani.Ai is a 30 billion parameter model, I have trained an agent on the gnani platform with a perfect knowledge base, but running it locally is not feasible.
+A gpu/ cloud space can be rented out to get better results.
