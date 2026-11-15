@@ -1,0 +1,4 @@
+CyberSaathi local reasoning policy is implemented in app/services/local_reasoning.py.
+Qwen3 performs incident reasoning and verification locally. A separate local Qwen3
+call creates English and selected-language summaries after Python safety guidance.
+Timbre is used only for text-to-speech.
